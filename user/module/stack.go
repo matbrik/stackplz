@@ -3,11 +3,13 @@ package module
 import (
     "bytes"
     "context"
+    "debug/elf"
     "errors"
     "fmt"
     "io/ioutil"
     "log"
     "math"
+    "os"
     "path/filepath"
     "stackplz/assets"
     "stackplz/user/argtype"
@@ -31,7 +33,8 @@ type MStack struct {
     eventFuncMaps     map[*ebpf.Map]event.IEventStruct
     eventMaps         []*ebpf.Map
 
-    hookBpfFile string
+    hookBpfFile  string
+    elfCodeDelta int64 // p_off - p_vaddr for the first executable PT_LOAD segment
 }
 
 const stackUprobeUID = "stack_uprobe"
@@ -97,13 +100,70 @@ func (this *MStack) buildStackProbe(uprobe_point *config.UprobeArgs, uid string)
 
     if sym == "" {
         stack_probe.AttachToFuncName = util.RandStringBytes(8)
-        // 这个是相对于库文件基址的偏移
-        stack_probe.UAddress = uprobe_point.Offset
+        // uprobe_point.Offset is a virtual address. cilium/ebpf converts symbol VAs to
+        // file offsets automatically, but skips that for address-based (UAddress) probes.
+        // Apply the ELF PT_LOAD delta (p_off - p_vaddr) to convert VA → file offset.
+        stack_probe.UAddress = uint64(int64(uprobe_point.Offset) + this.elfCodeDelta)
     } else {
         // 这个是相对于符号的偏移
         stack_probe.UprobeOffset = uprobe_point.Offset
     }
     return stack_probe
+}
+
+// resolveElfCodeOffset reads the first executable PT_LOAD segment from the library ELF
+// to compute the delta needed to convert virtual addresses to file offsets.
+// cilium/ebpf does this automatically for symbol-based probes but not for UAddress probes.
+func (this *MStack) resolveElfCodeOffset() {
+    points := this.mconf.StackUprobeConf.Points
+    if len(points) == 0 || points[0].Symbol != "" {
+        return
+    }
+    libPath := points[0].LibPath
+    if libPath == "" {
+        this.logger.Printf("elf code delta: no lib path, using delta=0")
+        return
+    }
+    f, err := os.Open(libPath)
+    if err != nil {
+        this.logger.Printf("elf code delta: open %s: %v, using delta=0", libPath, err)
+        return
+    }
+    defer f.Close()
+    ef, err := elf.NewFile(f)
+    if err != nil {
+        this.logger.Printf("elf code delta: parse %s: %v, using delta=0", libPath, err)
+        return
+    }
+    for _, prog := range ef.Progs {
+        if prog.Type != elf.PT_LOAD {
+            continue
+        }
+        flags := ""
+        if prog.Flags&elf.PF_R != 0 {
+            flags += "r"
+        } else {
+            flags += "-"
+        }
+        if prog.Flags&elf.PF_W != 0 {
+            flags += "w"
+        } else {
+            flags += "-"
+        }
+        if prog.Flags&elf.PF_X != 0 {
+            flags += "x"
+        } else {
+            flags += "-"
+        }
+        this.logger.Printf("elf PT_LOAD: p_off=0x%x p_vaddr=0x%x p_filesz=0x%x flags=%s", prog.Off, prog.Vaddr, prog.Filesz, flags)
+        if prog.Flags&elf.PF_X != 0 && this.elfCodeDelta == 0 {
+            this.elfCodeDelta = int64(prog.Off) - int64(prog.Vaddr)
+            this.logger.Printf("elf code delta: p_off=0x%x p_vaddr=0x%x delta=%d (0x%x)", prog.Off, prog.Vaddr, this.elfCodeDelta, this.elfCodeDelta)
+        }
+    }
+    if this.elfCodeDelta == 0 {
+        this.logger.Printf("elf code delta: no executable PT_LOAD found or delta is 0")
+    }
 }
 
 func (this *MStack) shouldLogStackPoint(idx int, total int) bool {
@@ -218,6 +278,9 @@ func (this *MStack) Clone() IModule {
 }
 
 func (this *MStack) start() error {
+    // Resolve ELF VA→file_offset delta before setupManager calls buildStackProbe.
+    this.resolveElfCodeOffset()
+
     // 初始化uprobe相关设置
     err := this.setupManager()
     if err != nil {
@@ -611,7 +674,8 @@ func (this *MStack) logTargetPidMaps(pid uint32, names []string, points []*confi
             if !this.shouldLogStackPoint(i, len(points)) {
                 continue
             }
-            fileOff := point.Offset
+            // Apply the same VA→file_offset delta used in buildStackProbe.
+            fileOff := uint64(int64(point.Offset) + this.elfCodeDelta)
             if point.NonElfOffset > 0 {
                 fileOff += point.NonElfOffset
             }
