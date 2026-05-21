@@ -104,6 +104,9 @@ func (this *MStack) buildStackProbe(uprobe_point *config.UprobeArgs, uid string)
 }
 
 func (this *MStack) addStackCloneHooks() error {
+    attached := 0
+    failed := 0
+    var firstErr error
     for i, uprobe_point := range this.mconf.StackUprobeConf.Points {
         if i == 0 {
             continue
@@ -111,8 +114,20 @@ func (this *MStack) addStackCloneHooks() error {
         uid := fmt.Sprintf("%s_%d", stackUprobeUID, i)
         stack_probe := this.buildStackProbe(uprobe_point, uid)
         if err := this.bpfManager.AddHook(stackUprobeUID, stack_probe); err != nil {
-            return fmt.Errorf("couldn't clone stack uprobe %d (%s): %v", i, uprobe_point.Name, err)
+            failed++
+            if firstErr == nil {
+                firstErr = err
+            }
+            this.logger.Printf("skip stack uprobe idx:%d %s attach failed: %v", i, uprobe_point.String(), err)
+            continue
         }
+        attached++
+    }
+    if failed > 0 {
+        this.logger.Printf("stack uprobe clone hooks attached:%d failed:%d first_error:%v", attached, failed, firstErr)
+    }
+    if attached == 0 && failed > 0 {
+        return fmt.Errorf("couldn't clone any stack uprobes, first error: %v", firstErr)
     }
     return nil
 }
