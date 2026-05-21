@@ -61,14 +61,17 @@ func (this *MStack) setupManager() error {
     probes = append(probes, fork_probe)
 
     for i, uprobe_point := range this.mconf.StackUprobeConf.Points {
+        if len(uprobe_point.PointArgs) > 0 {
+            return fmt.Errorf("mass uprobe mode supports empty params only; point %d (%s) has %d params", i, uprobe_point.Name, len(uprobe_point.PointArgs))
+        }
         // stack hook 配置
         sym := uprobe_point.Symbol
         var stack_probe *manager.Probe
         if sym == "" {
             sym = util.RandStringBytes(8)
             stack_probe = &manager.Probe{
-                Section:          fmt.Sprintf("uprobe/stack_%d", i),
-                EbpfFuncName:     fmt.Sprintf("probe_stack_%d", i),
+                Section:          "uprobe/stack",
+                EbpfFuncName:     "probe_stack",
                 AttachToFuncName: sym,
                 RealFilePath:     uprobe_point.RealFilePath,
                 BinaryPath:       uprobe_point.LibPath,
@@ -78,8 +81,8 @@ func (this *MStack) setupManager() error {
             }
         } else {
             stack_probe = &manager.Probe{
-                Section:          fmt.Sprintf("uprobe/stack_%d", i),
-                EbpfFuncName:     fmt.Sprintf("probe_stack_%d", i),
+                Section:          "uprobe/stack",
+                EbpfFuncName:     "probe_stack",
                 AttachToFuncName: sym,
                 RealFilePath:     uprobe_point.RealFilePath,
                 BinaryPath:       uprobe_point.LibPath,

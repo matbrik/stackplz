@@ -12,6 +12,8 @@ import (
     "syscall"
 )
 
+const UPROBE_PC_INDEX uint32 = 0xffffffff
+
 type UprobeEvent struct {
     ContextEvent
     UUID         string
@@ -50,10 +52,16 @@ func (this *UprobeEvent) ParseContext() (err error) {
     this.ReadArg(&this.SP)
     this.ReadArg(&this.PC)
     // 根据预设索引解析参数
-    if (this.ProbeIndex + 1) > uint32(len(this.mconf.StackUprobeConf.Points)) {
+    if this.ProbeIndex == UPROBE_PC_INDEX {
+        this.uprobe_point = this.ResolvePointByPC()
+    } else if (this.ProbeIndex + 1) > uint32(len(this.mconf.StackUprobeConf.Points)) {
         panic(fmt.Sprintf("probe_index %d bigger than points", this.ProbeIndex))
+    } else {
+        this.uprobe_point = this.mconf.StackUprobeConf.Points[this.ProbeIndex]
     }
-    this.uprobe_point = this.mconf.StackUprobeConf.Points[this.ProbeIndex]
+    if this.uprobe_point == nil {
+        this.uprobe_point = &config.UprobeArgs{Name: fmt.Sprintf("0x%x", this.PC)}
+    }
     this.ArgName = this.uprobe_point.Name
     if this.uprobe_point.KillSignal == uint32(syscall.SIGSTOP) && this.Pid != 0 {
         AddStopped(this.Pid)
@@ -76,6 +84,32 @@ func (this *UprobeEvent) ParseContext() (err error) {
     }
     if this.mconf.AutoResume {
         LetItResume(this.Pid)
+    }
+    return nil
+}
+
+func (this *UprobeEvent) ResolvePointByPC() *config.UprobeArgs {
+    pid_maps, err := maps_helper.FindLib(this.Pid)
+    if err != nil {
+        return nil
+    }
+    for _, lib_infos := range pid_maps {
+        for _, lib_info := range lib_infos {
+            if this.PC < lib_info.BaseAddr || this.PC >= lib_info.EndAddr {
+                continue
+            }
+            map_off := lib_info.Off + (this.PC - lib_info.BaseAddr)
+            for _, point := range this.mconf.StackUprobeConf.Points {
+                point_off := point.Offset
+                if point.NonElfOffset > 0 {
+                    point_off += point.NonElfOffset
+                }
+                if map_off == point_off || map_off+4 == point_off || (map_off >= 4 && map_off-4 == point_off) {
+                    this.ProbeIndex = point.Index
+                    return point
+                }
+            }
+        }
     }
     return nil
 }
