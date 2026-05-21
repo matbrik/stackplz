@@ -34,8 +34,36 @@ int tracepoint__sched__sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
     return 0;
 }
 
-static __noinline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) {
+static __always_inline int save_stack_header(event_data_t* event, u32 point_key, u64 lr, u64 sp, u64 pc)
+{
+    event->args[0] = 0;
+    if (bpf_probe_read(&(event->args[1]), sizeof(point_key), &point_key) != 0)
+        return 0;
+
+    event->args[5] = 1;
+    if (bpf_probe_read(&(event->args[6]), sizeof(lr), &lr) != 0)
+        return 0;
+
+    event->args[14] = 2;
+    if (bpf_probe_read(&(event->args[15]), sizeof(sp), &sp) != 0)
+        return 0;
+
+    event->args[23] = 3;
+    if (bpf_probe_read(&(event->args[24]), sizeof(pc), &pc) != 0)
+        return 0;
+
+    event->buf_off = 32;
+    event->context.argnum = 4;
+    return 1;
+}
+
+static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) {
+    int zero = 0;
     program_data_t p = {};
+    event_data_t* event = bpf_map_lookup_elem(&event_data_map, &zero);
+    if (unlikely(event == NULL)) return 0;
+    p.event = event;
+
     if (!init_program_data(&p, ctx)) {
         return 0;
     }
@@ -70,24 +98,19 @@ static __noinline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) {
         del_regs(UPROBE_ENTER + point_args->enter_key);
     }
 
-    save_to_submit_buf(p.event, (void *) &point_key, sizeof(u32), 0);
     u64 lr = 0;
     u64 sp = 0;
     if(filter->is_32bit) {
         bpf_probe_read_kernel(&lr, sizeof(lr), &ctx->regs[14]);
-        save_to_submit_buf(p.event, (void *) &lr, sizeof(u64), 1);
         bpf_probe_read_kernel(&sp, sizeof(sp), &ctx->regs[13]);
-        save_to_submit_buf(p.event, (void *) &sp, sizeof(u64), 2);
     }
     else {
         bpf_probe_read_kernel(&lr, sizeof(lr), &ctx->regs[30]);
-        save_to_submit_buf(p.event, (void *) &lr, sizeof(u64), 1);
         bpf_probe_read_kernel(&sp, sizeof(sp), &ctx->sp);
-        save_to_submit_buf(p.event, (void *) &sp, sizeof(u64), 2);
     }
     u64 pc = 0;
     bpf_probe_read_kernel(&pc, sizeof(pc), &ctx->pc);
-    save_to_submit_buf(p.event, (void *) &pc, sizeof(u64), 3);
+    if (!save_stack_header(event, point_key, lr, sp, pc)) return 0;
 
     int ctx_index = 0;
     op_ctx_t* op_ctx = bpf_map_lookup_elem(&op_ctx_map, &ctx_index);
