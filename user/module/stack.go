@@ -249,6 +249,17 @@ func (this *MStack) start() error {
         return fmt.Errorf("couldn't start bootstrap manager %v .", err)
     }
 
+    // Start() silently swallows probe attachment errors; check bootstrap probe explicitly.
+    if bootstrapProbe, found := this.bpfManager.GetProbe(manager.ProbeIdentificationPair{UID: stackUprobeUID, EbpfFuncName: "probe_stack"}); found {
+        if bootstrapProbe.IsRunning() {
+            this.logger.Printf("bootstrap uprobe attached and running")
+        } else {
+            this.logger.Printf("WARNING: bootstrap uprobe NOT running (last error: %v)", bootstrapProbe.GetLastError())
+        }
+    } else {
+        this.logger.Printf("WARNING: bootstrap uprobe probe not found in manager after Start()")
+    }
+
     if err = this.addStackCloneHooks(); err != nil {
         return err
     }

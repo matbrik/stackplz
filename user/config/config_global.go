@@ -143,6 +143,13 @@ func (this *GlobalConfig) FindLibInApk(library string, sconfig *StackUprobeConfi
                     }
                     dstFile.Close()
                     srcFile.Close()
+                    // If library is compressed inside the APK, the data offset
+                    // points to deflate bytes, not ELF code — uprobes would silently never fire.
+                    if f.Method != zip.Store {
+                        sconfig.RealFilePath = sconfig.LibPath
+                        sconfig.NonElfOffset = 0
+                        return nil
+                    }
                     offset, err := f.DataOffset()
                     if err != nil {
                         return err
