@@ -285,11 +285,14 @@ func (this *StackUprobeConfig) GetSyscall(mconfig *ModuleConfig) string {
 }
 
 func (this *StackUprobeConfig) Parse_FileConfig(config *UprobeFileConfig) (err error) {
-    for index, point_config := range config.Points {
+    if len(this.Points)+len(config.Points) > UPROBE_MAX_COUNT {
+        return errors.New(fmt.Sprintf("max uprobe hook point count is %d, provided count:%d", UPROBE_MAX_COUNT, len(this.Points)+len(config.Points)))
+    }
+    for _, point_config := range config.Points {
         hook_point := &UprobeArgs{}
         hook_point.BindSyscall = false
         hook_point.ExitRead = false
-        hook_point.Index = uint32(index)
+        hook_point.Index = uint32(len(this.Points))
         hook_point.LibPath = this.LibPath
         hook_point.RealFilePath = this.RealFilePath
         hook_point.NonElfOffset = this.NonElfOffset
@@ -337,13 +340,13 @@ func (this *StackUprobeConfig) Parse_HookPoint(configs []string) (err error) {
     if this.LibPath == "" {
         return errors.New("library is empty, plz set with -l/--lib")
     }
-    if len(configs) > 6 {
-        return errors.New("max uprobe hook point count is 6")
+    if len(this.Points)+len(configs) > UPROBE_MAX_COUNT {
+        return errors.New(fmt.Sprintf("max uprobe hook point count is %d, provided count:%d", UPROBE_MAX_COUNT, len(this.Points)+len(configs)))
     }
 
     // strstr+0x0[str,str] 命中 strstr + 0x0 时将x0和x1读取为字符串
     // write[int,buf:128,int] 命中 write 时将x0读取为int、x1读取为字节数组、x2读取为int
-    for point_index, config_str := range configs {
+    for _, config_str := range configs {
         exit_read := false
         bind_syscall := false
         if strings.HasSuffix(config_str, "]s") {
@@ -376,7 +379,7 @@ func (this *StackUprobeConfig) Parse_HookPoint(configs []string) (err error) {
             hook_point.BindSyscall = bind_syscall
             hook_point.ExitRead = exit_read
             hook_point.ExitOffset = exit_offset
-            hook_point.Index = uint32(point_index)
+            hook_point.Index = uint32(len(this.Points))
             hook_point.Offset = 0x0
             hook_point.LibPath = this.LibPath
             hook_point.RealFilePath = this.RealFilePath
@@ -424,6 +427,9 @@ func (this *StackUprobeConfig) Parse_HookPoint(configs []string) (err error) {
     for point_idx := 0; point_idx < point_count; point_idx++ {
         point := this.Points[point_idx]
         if point.ExitOffset != 0x0 {
+            if len(this.Points) >= UPROBE_MAX_COUNT {
+                return errors.New(fmt.Sprintf("max uprobe hook point count is %d, provided count:%d", UPROBE_MAX_COUNT, len(this.Points)+1))
+            }
             this.Points = append(this.Points, point.GetExitPoint(len(this.Points)))
         }
     }

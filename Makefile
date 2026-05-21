@@ -42,6 +42,7 @@ ebpf_stack:
 	$(DEBUG_PRINT)	\
 	-I       libbpf/src \
 	-I       src \
+	-I       src/bpf \
 	-g \
 	-o user/assets/stack.o \
 	src/stack.c
@@ -59,6 +60,7 @@ ebpf_syscall:
 	$(DEBUG_PRINT)	\
 	-I       libbpf/src \
 	-I       src \
+	-I       src/bpf \
 	-g \
 	-o user/assets/syscall.o \
 	src/syscall.c
@@ -75,6 +77,7 @@ ebpf_perf_mmap:
 	$(DEBUG_PRINT)	\
 	-I       libbpf/src \
 	-I       src \
+	-I       src/bpf \
 	-g \
 	-o user/assets/perf_mmap.o \
 	src/perf_mmap.c

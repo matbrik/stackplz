@@ -11,3 +11,4 @@ assets/ebpf_probe.go
 
 # Allow
 !user/assets/placeholder
+inputfiles/

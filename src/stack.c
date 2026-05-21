@@ -118,37 +118,12 @@ static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) 
     return 0;
 }
 
-SEC("uprobe/stack_0")
-int probe_stack_0(struct pt_regs* ctx) {
-    u32 point_key = 0;
-    return probe_stack_warp(ctx, point_key);
-}
-
 #define PROBE_STACK(name)                          \
-    SEC("uprobe/stack_##name")                     \
+    SEC("uprobe/stack_" #name)                     \
     int probe_stack_##name(struct pt_regs* ctx)    \
     {                                              \
         u32 point_key = name;                       \
         return probe_stack_warp(ctx, point_key);    \
     }
 
-// PROBE_STACK(0);
-PROBE_STACK(1);
-PROBE_STACK(2);
-PROBE_STACK(3);
-PROBE_STACK(4);
-PROBE_STACK(5);
-// PROBE_STACK(6);
-// PROBE_STACK(7);
-// PROBE_STACK(8);
-// PROBE_STACK(9);
-// PROBE_STACK(10);
-// PROBE_STACK(11);
-// PROBE_STACK(12);
-// PROBE_STACK(13);
-// PROBE_STACK(14);
-// PROBE_STACK(15);
-// PROBE_STACK(16);
-// PROBE_STACK(17);
-// PROBE_STACK(18);
-// PROBE_STACK(19);
+#include "uprobe_probes.h"

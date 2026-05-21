@@ -3,6 +3,7 @@
 
 #define TASK_COMM_LEN 16
 #define MAX_COUNT 20
+#define UPROBE_MAX_COUNT 2048
 #define MAX_FILTER_COUNT 6
 #define MAX_PATH_COMPONENTS   48
 #define MAX_LOOP_COUNT 32
