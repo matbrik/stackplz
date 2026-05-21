@@ -34,7 +34,7 @@ int tracepoint__sched__sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
     return 0;
 }
 
-static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) {
+static __noinline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) {
     program_data_t p = {};
     if (!init_program_data(&p, ctx)) {
         return 0;

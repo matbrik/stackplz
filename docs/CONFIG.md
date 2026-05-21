@@ -18,7 +18,7 @@ adb push tests /data/local/tmp
     - 通常情况下只需要提供文件名，如果出现找不到的情况，请指定完整路径
     - 对于split apk中的so同样提供了支持
 - **points** 表示hook点列表
-    - 注意，对于uprobe，单次hook最多支持`UPROBE_MAX_COUNT`个hook点，当前默认值为2048
+    - 注意，对于uprobe，单次hook最多支持`UPROBE_MAX_COUNT`个hook点，当前默认值为1158
 
 **2. points元素字段**
 

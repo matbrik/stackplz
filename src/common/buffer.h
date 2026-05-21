@@ -16,25 +16,26 @@ static __always_inline buf_t *get_buf(int idx)
 static __always_inline int save_to_submit_buf(event_data_t *event, void *ptr, u32 size, u8 index)
 {
     // Data saved to submit buf: [index][ ... buffer[size] ... ]
+    u32 buf_off = event->buf_off;
 
     if (size == 0)
         return 0;
 
     barrier();
-    if (event->buf_off > ARGS_BUF_SIZE - 1)
+    if (buf_off > ARGS_BUF_SIZE - 1)
         return 0;
 
     // Save argument index
-    event->args[event->buf_off] = index;
+    event->args[buf_off] = index;
 
     // Satisfy verifier
-    if (event->buf_off > ARGS_BUF_SIZE - (MAX_ELEMENT_SIZE + 1))
+    if (buf_off > ARGS_BUF_SIZE - (MAX_ELEMENT_SIZE + 1))
         return 0;
 
     // Read into buffer
-    if (bpf_probe_read(&(event->args[event->buf_off + 1]), size, ptr) == 0) {
+    if (bpf_probe_read(&(event->args[buf_off + 1]), size, ptr) == 0) {
         // We update buf_off only if all writes were successful
-        event->buf_off += size + 1;
+        event->buf_off = buf_off + size + 1;
         event->context.argnum++;
         return 1;
     }

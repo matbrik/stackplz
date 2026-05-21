@@ -9,7 +9,7 @@ const (
 )
 
 const MAX_COUNT = 1024
-const UPROBE_MAX_COUNT = 2048
+const UPROBE_MAX_COUNT = 1158
 const MAX_FILTER_COUNT = 6
 
 const (
