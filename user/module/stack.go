@@ -5,6 +5,7 @@ import (
     "context"
     "errors"
     "fmt"
+    "io/ioutil"
     "log"
     "math"
     "path/filepath"
@@ -73,6 +74,7 @@ func (this *MStack) setupManager() error {
         }
         probes = append(probes, this.buildStackProbe(uprobe_point, stackUprobeUID))
     }
+    this.logStackConfigSummary()
 
     this.bpfManager = &manager.Manager{
         Probes: probes,
@@ -104,10 +106,37 @@ func (this *MStack) buildStackProbe(uprobe_point *config.UprobeArgs, uid string)
     return stack_probe
 }
 
+func (this *MStack) shouldLogStackPoint(idx int, total int) bool {
+    return idx < 5 || idx >= total-5 || idx%256 == 0
+}
+
+func (this *MStack) logStackConfigSummary() {
+    points := this.mconf.StackUprobeConf.Points
+    if len(points) == 0 {
+        return
+    }
+    first := points[0]
+    last := points[len(points)-1]
+    this.logger.Printf(
+        "stack uprobe config points:%d lib_path:%s real_file:%s non_elf_offset:0x%x first:%s last:%s",
+        len(points), first.LibPath, first.RealFilePath, first.NonElfOffset, first.Name, last.Name,
+    )
+    this.logStackProbe("bootstrap stack uprobe", 0, first, this.buildStackProbe(first, stackUprobeUID))
+}
+
+func (this *MStack) logStackProbe(prefix string, idx int, point *config.UprobeArgs, probe *manager.Probe) {
+    this.logger.Printf(
+        "%s idx:%d uid:%s name:%s symbol:%s offset:0x%x non_elf_offset:0x%x attach_file:%s binary:%s attach_func:%s uaddr:0x%x uprobe_offset:0x%x",
+        prefix, idx, probe.UID, point.Name, point.Symbol, point.Offset, point.NonElfOffset,
+        probe.RealFilePath, probe.BinaryPath, probe.AttachToFuncName, probe.UAddress, probe.UprobeOffset,
+    )
+}
+
 func (this *MStack) addStackCloneHooks() error {
     attached := 0
     failed := 0
     var firstErr error
+    total := len(this.mconf.StackUprobeConf.Points)
     for i, uprobe_point := range this.mconf.StackUprobeConf.Points {
         if i == 0 {
             continue
@@ -123,6 +152,9 @@ func (this *MStack) addStackCloneHooks() error {
             continue
         }
         attached++
+        if this.shouldLogStackPoint(i, total) {
+            this.logStackProbe("attached stack uprobe", i, uprobe_point, stack_probe)
+        }
     }
     if failed > 0 {
         this.logger.Printf("stack uprobe clone hooks attached:%d failed:%d first_error:%v", attached, failed, firstErr)
@@ -474,11 +506,14 @@ func (this *MStack) startStackStatsLogger() {
         return
     }
     logStats(stats)
+    this.logTargetMapDiagnostics()
+    this.logKernelUprobeDiagnostics()
 
     go func() {
         ticker := time.NewTicker(5 * time.Second)
         defer ticker.Stop()
         lastStats := stats
+        ticks := 0
         for {
             select {
             case <-this.ctx.Done():
@@ -497,9 +532,177 @@ func (this *MStack) startStackStatsLogger() {
                     logStats(stats)
                     lastStats = stats
                 }
+                ticks++
+                if stats[0] == 0 && ticks%3 == 0 {
+                    this.logTargetMapDiagnostics()
+                    this.logKernelUprobeDiagnostics()
+                }
             }
         }
     }()
+}
+
+func (this *MStack) logTargetMapDiagnostics() {
+    points := this.mconf.StackUprobeConf.Points
+    if len(points) == 0 {
+        return
+    }
+    pids := this.mconf.PidWhitelist
+    if len(pids) == 0 {
+        this.logger.Printf("stack maps diag skipped: no pid whitelist; uid whitelist cannot be mapped directly")
+        return
+    }
+
+    first := points[0]
+    names := []string{}
+    names = appendDiagName(names, first.RealFilePath)
+    names = appendDiagName(names, first.LibPath)
+    for _, pid := range pids {
+        this.logTargetPidMaps(pid, names, points)
+    }
+}
+
+func appendDiagName(names []string, name string) []string {
+    if name == "" {
+        return names
+    }
+    names = append(names, name)
+    base := filepath.Base(name)
+    if base != "" && base != "." && base != "/" && base != name {
+        names = append(names, base)
+    }
+    return names
+}
+
+func (this *MStack) logTargetPidMaps(pid uint32, names []string, points []*config.UprobeArgs) {
+    content, err := util.ReadMapsByPid(pid)
+    if err != nil {
+        this.logger.Printf("stack maps diag pid:%d read maps failed: %v", pid, err)
+        return
+    }
+
+    matched := 0
+    execMatched := 0
+    predicted := 0
+    for _, line := range strings.Split(content, "\n") {
+        if line == "" || !this.mapLineMatches(line, names) {
+            continue
+        }
+        matched++
+        this.logger.Printf("stack maps diag pid:%d map:%s", pid, line)
+
+        start, end, perms, off, path, ok := this.parseMapLine(line)
+        if !ok || !strings.Contains(perms, "x") {
+            continue
+        }
+        execMatched++
+        for i, point := range points {
+            if !this.shouldLogStackPoint(i, len(points)) {
+                continue
+            }
+            fileOff := point.Offset
+            if point.NonElfOffset > 0 {
+                fileOff += point.NonElfOffset
+            }
+            mapSize := end - start
+            if fileOff >= off && fileOff < off+mapSize {
+                runtimeAddr := start + (fileOff - off)
+                predicted++
+                this.logger.Printf(
+                    "stack maps diag pid:%d idx:%d point:%s file_off:0x%x runtime:0x%x map_off:0x%x map_path:%s",
+                    pid, i, point.Name, fileOff, runtimeAddr, off, path,
+                )
+            }
+        }
+    }
+    this.logger.Printf("stack maps diag pid:%d matched_maps:%d executable_maps:%d predicted_logged_points:%d", pid, matched, execMatched, predicted)
+}
+
+func (this *MStack) mapLineMatches(line string, names []string) bool {
+    for _, name := range names {
+        if name != "" && strings.Contains(line, name) {
+            return true
+        }
+    }
+    return false
+}
+
+func (this *MStack) parseMapLine(line string) (uint64, uint64, string, uint64, string, bool) {
+    var start uint64
+    var end uint64
+    var off uint64
+    var inode uint64
+    var perms string
+    var dev string
+    var path string
+    n, err := fmt.Sscanf(line, "%x-%x %s %x %s %d %s", &start, &end, &perms, &off, &dev, &inode, &path)
+    if err != nil || n < 6 {
+        return 0, 0, "", 0, "", false
+    }
+    return start, end, perms, off, path, true
+}
+
+func (this *MStack) logKernelUprobeDiagnostics() {
+    points := this.mconf.StackUprobeConf.Points
+    if len(points) == 0 {
+        return
+    }
+
+    paths := []string{
+        "/sys/kernel/tracing/uprobe_events",
+        "/sys/kernel/debug/tracing/uprobe_events",
+    }
+    first := points[0]
+    names := []string{"probe_stack"}
+    names = appendDiagName(names, first.RealFilePath)
+    names = appendDiagName(names, first.LibPath)
+    for _, path := range paths {
+        content, err := ioutil.ReadFile(path)
+        if err != nil {
+            continue
+        }
+        matched := 0
+        for _, line := range strings.Split(string(content), "\n") {
+            if !this.mapLineMatches(line, names) {
+                continue
+            }
+            if matched < 20 {
+                this.logger.Printf("kernel uprobe diag %s: %s", path, line)
+            }
+            matched++
+        }
+        this.logger.Printf("kernel uprobe diag %s matched_entries:%d", path, matched)
+        this.logKernelUprobeProfile(names)
+        return
+    }
+    this.logger.Printf("kernel uprobe diag skipped: uprobe_events not readable")
+    this.logKernelUprobeProfile(names)
+}
+
+func (this *MStack) logKernelUprobeProfile(names []string) {
+    paths := []string{
+        "/sys/kernel/tracing/uprobe_profile",
+        "/sys/kernel/debug/tracing/uprobe_profile",
+    }
+    for _, path := range paths {
+        content, err := ioutil.ReadFile(path)
+        if err != nil {
+            continue
+        }
+        matched := 0
+        for _, line := range strings.Split(string(content), "\n") {
+            if !this.mapLineMatches(line, names) {
+                continue
+            }
+            if matched < 20 {
+                this.logger.Printf("kernel uprobe profile %s: %s", path, line)
+            }
+            matched++
+        }
+        this.logger.Printf("kernel uprobe profile %s matched_entries:%d", path, matched)
+        return
+    }
+    this.logger.Printf("kernel uprobe profile skipped: uprobe_profile not readable")
 }
 
 func (this *MStack) FindMap(map_name string) (*ebpf.Map, error) {
