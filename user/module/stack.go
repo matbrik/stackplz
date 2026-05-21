@@ -32,6 +32,8 @@ type MStack struct {
     hookBpfFile string
 }
 
+const stackUprobeUID = "stack_uprobe"
+
 func (this *MStack) Init(ctx context.Context, logger *log.Logger, conf config.IConfig) error {
     this.Module.Init(ctx, logger, conf)
     this.Module.SetChild(this)
@@ -64,40 +66,53 @@ func (this *MStack) setupManager() error {
         if len(uprobe_point.PointArgs) > 0 {
             return fmt.Errorf("mass uprobe mode supports empty params only; point %d (%s) has %d params", i, uprobe_point.Name, len(uprobe_point.PointArgs))
         }
-        // stack hook 配置
-        sym := uprobe_point.Symbol
-        var stack_probe *manager.Probe
-        if sym == "" {
-            sym = util.RandStringBytes(8)
-            stack_probe = &manager.Probe{
-                Section:          "uprobe/stack",
-                EbpfFuncName:     "probe_stack",
-                AttachToFuncName: sym,
-                RealFilePath:     uprobe_point.RealFilePath,
-                BinaryPath:       uprobe_point.LibPath,
-                NonElfOffset:     uprobe_point.NonElfOffset,
-                // 这个是相对于库文件基址的偏移
-                UAddress: uprobe_point.Offset,
-            }
-        } else {
-            stack_probe = &manager.Probe{
-                Section:          "uprobe/stack",
-                EbpfFuncName:     "probe_stack",
-                AttachToFuncName: sym,
-                RealFilePath:     uprobe_point.RealFilePath,
-                BinaryPath:       uprobe_point.LibPath,
-                NonElfOffset:     uprobe_point.NonElfOffset,
-                // 这个是相对于符号的偏移
-                UprobeOffset: uprobe_point.Offset,
-            }
-        }
         this.logger.Printf("idx:%d %s", i, uprobe_point.String())
-        probes = append(probes, stack_probe)
+        if i > 0 {
+            continue
+        }
+        probes = append(probes, this.buildStackProbe(uprobe_point, stackUprobeUID))
     }
 
     this.bpfManager = &manager.Manager{
         Probes: probes,
         Maps:   maps,
+    }
+    return nil
+}
+
+func (this *MStack) buildStackProbe(uprobe_point *config.UprobeArgs, uid string) *manager.Probe {
+    sym := uprobe_point.Symbol
+    stack_probe := &manager.Probe{
+        UID:              uid,
+        Section:          "uprobe/stack",
+        EbpfFuncName:     "probe_stack",
+        AttachToFuncName: sym,
+        RealFilePath:     uprobe_point.RealFilePath,
+        BinaryPath:       uprobe_point.LibPath,
+        NonElfOffset:     uprobe_point.NonElfOffset,
+    }
+
+    if sym == "" {
+        stack_probe.AttachToFuncName = util.RandStringBytes(8)
+        // 这个是相对于库文件基址的偏移
+        stack_probe.UAddress = uprobe_point.Offset
+    } else {
+        // 这个是相对于符号的偏移
+        stack_probe.UprobeOffset = uprobe_point.Offset
+    }
+    return stack_probe
+}
+
+func (this *MStack) addStackCloneHooks() error {
+    for i, uprobe_point := range this.mconf.StackUprobeConf.Points {
+        if i == 0 {
+            continue
+        }
+        uid := fmt.Sprintf("%s_%d", stackUprobeUID, i)
+        stack_probe := this.buildStackProbe(uprobe_point, uid)
+        if err := this.bpfManager.AddHook(stackUprobeUID, stack_probe); err != nil {
+            return fmt.Errorf("couldn't clone stack uprobe %d (%s): %v", i, uprobe_point.Name, err)
+        }
     }
     return nil
 }
@@ -176,6 +191,10 @@ func (this *MStack) start() error {
     // 启动 bpfManager
     if err = this.bpfManager.Start(); err != nil {
         return fmt.Errorf("couldn't start bootstrap manager %v .", err)
+    }
+
+    if err = this.addStackCloneHooks(); err != nil {
+        return err
     }
 
     // 通过更新 BPF_MAP_TYPE_HASH 类型的 map 实现过滤设定的同步
