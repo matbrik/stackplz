@@ -9,6 +9,25 @@
 
 #define UPROBE_PC_INDEX 0xffffffff
 
+enum stack_stat_index {
+    STACK_STAT_ENTERED = 0,
+    STACK_STAT_NO_EVENT = 1,
+    STACK_STAT_INIT_FAIL = 2,
+    STACK_STAT_FILTER_DROP = 3,
+    STACK_STAT_FILTER_PASS = 4,
+    STACK_STAT_HEADER_SAVED = 5,
+    STACK_STAT_SUBMIT_OK = 6,
+    STACK_STAT_SUBMIT_ERR = 7,
+};
+
+static __always_inline void inc_stack_stat(u32 stat_key)
+{
+    u64* value = bpf_map_lookup_elem(&stack_stats, &stat_key);
+    if (value != NULL) {
+        __sync_fetch_and_add(value, 1);
+    }
+}
+
 SEC("raw_tracepoint/sched_process_fork")
 int tracepoint__sched__sched_process_fork(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -60,18 +79,27 @@ static __always_inline int save_stack_header(event_data_t* event, u32 point_key,
 }
 
 static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) {
+    inc_stack_stat(STACK_STAT_ENTERED);
+
     int zero = 0;
     program_data_t p = {};
     event_data_t* event = bpf_map_lookup_elem(&event_data_map, &zero);
-    if (unlikely(event == NULL)) return 0;
+    if (unlikely(event == NULL)) {
+        inc_stack_stat(STACK_STAT_NO_EVENT);
+        return 0;
+    }
     p.event = event;
 
     if (!init_program_data(&p, ctx)) {
+        inc_stack_stat(STACK_STAT_INIT_FAIL);
         return 0;
     }
 
-    if (!should_trace(&p))
+    if (!should_trace(&p)) {
+        inc_stack_stat(STACK_STAT_FILTER_DROP);
         return 0;
+    }
+    inc_stack_stat(STACK_STAT_FILTER_PASS);
 
     u32 filter_key = 0;
     common_filter_t* filter = bpf_map_lookup_elem(&common_filter, &filter_key);
@@ -90,8 +118,14 @@ static __always_inline u32 probe_stack_warp(struct pt_regs* ctx, u32 point_key) 
     u64 pc = 0;
     bpf_probe_read_kernel(&pc, sizeof(pc), &ctx->pc);
     if (!save_stack_header(event, point_key, lr, sp, pc)) return 0;
+    inc_stack_stat(STACK_STAT_HEADER_SAVED);
 
-    events_perf_submit(&p, UPROBE_ENTER);
+    long submit_ret = events_perf_submit(&p, UPROBE_ENTER);
+    if (submit_ret == 0) {
+        inc_stack_stat(STACK_STAT_SUBMIT_OK);
+    } else {
+        inc_stack_stat(STACK_STAT_SUBMIT_ERR);
+    }
     if (filter->signal > 0) {
         bpf_send_signal(filter->signal);
     }

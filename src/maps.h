@@ -50,5 +50,6 @@ BPF_HASH(uprobe_point_args, u32, point_args_t, UPROBE_MAX_COUNT);
 BPF_HASH(sysenter_point_args, u32, point_args_t, 512);
 BPF_HASH(sysexit_point_args, u32, point_args_t, 512);
 BPF_ARRAY(base_config, config_entry_t, 1);
+BPF_ARRAY(stack_stats, u64, 8);
 
 #endif /* __MAPS_H__ */

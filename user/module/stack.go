@@ -14,6 +14,7 @@ import (
     "stackplz/user/event"
     "stackplz/user/util"
     "strings"
+    "time"
     "unsafe"
 
     "github.com/cilium/ebpf"
@@ -125,6 +126,8 @@ func (this *MStack) addStackCloneHooks() error {
     }
     if failed > 0 {
         this.logger.Printf("stack uprobe clone hooks attached:%d failed:%d first_error:%v", attached, failed, firstErr)
+    } else {
+        this.logger.Printf("stack uprobe clone hooks attached:%d failed:%d", attached, failed)
     }
     if attached == 0 && failed > 0 {
         return fmt.Errorf("couldn't clone any stack uprobes, first error: %v", firstErr)
@@ -203,6 +206,12 @@ func (this *MStack) start() error {
         return fmt.Errorf("couldn't init manager %v", err)
     }
 
+    // 通过更新 BPF_MAP_TYPE_HASH 类型的 map 实现过滤设定的同步
+    err = this.updateFilter()
+    if err != nil {
+        return err
+    }
+
     // 启动 bpfManager
     if err = this.bpfManager.Start(); err != nil {
         return fmt.Errorf("couldn't start bootstrap manager %v .", err)
@@ -212,17 +221,13 @@ func (this *MStack) start() error {
         return err
     }
 
-    // 通过更新 BPF_MAP_TYPE_HASH 类型的 map 实现过滤设定的同步
-    err = this.updateFilter()
-    if err != nil {
-        return err
-    }
-
     // 加载map信息，设置eventFuncMaps，给不同的事件指定处理事件数据的函数
     err = this.initDecodeFun()
     if err != nil {
         return err
     }
+
+    this.startStackStatsLogger()
 
     return nil
 }
@@ -436,6 +441,65 @@ func (this *MStack) initDecodeFun() error {
     uprobestackEvent := &event.UprobeEvent{}
     this.eventFuncMaps[EventsMap] = uprobestackEvent
     return nil
+}
+
+func (this *MStack) readStackStats(stackStatsMap *ebpf.Map) ([8]uint64, error) {
+    var stats [8]uint64
+    for i := range stats {
+        key := uint32(i)
+        if err := stackStatsMap.Lookup(key, &stats[i]); err != nil {
+            return stats, err
+        }
+    }
+    return stats, nil
+}
+
+func (this *MStack) startStackStatsLogger() {
+    stackStatsMap, err := this.FindMap("stack_stats")
+    if err != nil {
+        this.logger.Printf("stack stats unavailable: %v", err)
+        return
+    }
+
+    logStats := func(stats [8]uint64) {
+        this.logger.Printf(
+            "stack stats entered:%d no_event:%d init_fail:%d filter_drop:%d filter_pass:%d header_saved:%d submit_ok:%d submit_err:%d",
+            stats[0], stats[1], stats[2], stats[3], stats[4], stats[5], stats[6], stats[7],
+        )
+    }
+
+    stats, err := this.readStackStats(stackStatsMap)
+    if err != nil {
+        this.logger.Printf("read stack stats failed: %v", err)
+        return
+    }
+    logStats(stats)
+
+    go func() {
+        ticker := time.NewTicker(5 * time.Second)
+        defer ticker.Stop()
+        lastStats := stats
+        for {
+            select {
+            case <-this.ctx.Done():
+                stats, err := this.readStackStats(stackStatsMap)
+                if err == nil && stats != lastStats {
+                    logStats(stats)
+                }
+                return
+            case <-ticker.C:
+                stats, err := this.readStackStats(stackStatsMap)
+                if err != nil {
+                    this.logger.Printf("read stack stats failed: %v", err)
+                    return
+                }
+                if stats != lastStats {
+                    logStats(stats)
+                    lastStats = stats
+                }
+            }
+        }
+    }()
 }
 
 func (this *MStack) FindMap(map_name string) (*ebpf.Map, error) {
