@@ -26,7 +26,7 @@ jobs:
     - name: Clone dependencies
       run: |
         cd ..
-        git clone https://github.com/SeeFlowerX/ebpf
+        git clone https://github.com/matbrik/ebpf
         git clone https://github.com/SeeFlowerX/ebpfmanager
         cd -
         bash ./build_env.sh
